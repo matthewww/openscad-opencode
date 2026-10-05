@@ -1,0 +1,21 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package source zip
+        run: |
+          git archive --format=zip \
+            --prefix=openscad-opencode-${{ github.ref_name }}/ \
+            -o openscad-opencode-${{ github.ref_name }}.zip HEAD
+      - name: Create GitHub release
+        run: gh release create "${{ github.ref_name }}" openscad-opencode-*.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,27 @@
+{
+  "name": "openscad-opencode",
+  "version": "0.1.0",
+  "description": "Self-contained OpenSCAD skill + CLI for opencode and other agent tools: compile-check .scad, render PNG previews, export STL/3MF, verify mesh stats.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "osc": ".opencode/skills/openscad/osc.mjs"
+  },
+  "files": [
+    ".opencode/skills/openscad/SKILL.md",
+    ".opencode/skills/openscad/osc.mjs",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "openscad",
+    "mcp",
+    "skill",
+    "opencode",
+    "3dprinting",
+    "stl",
+    "agent"
+  ]
+}
