@@ -38,11 +38,11 @@ flange_hole_depth = 5; // [2:0.5:8]
 
 /* [Shape] */
 // Vertical corner radius of the block, front pair (4 matches round legs)
-corner_r_front = 4; // [0:0.25:8]
+corner_r_front = 1.25; // [0:0.25:8]
 // Vertical corner radius of the block, back pair (face side)
-corner_r_back = 1; // [0:0.25:8]
+corner_r_back = 4; // [0:0.25:8]
 // Square off the front half of both legs (uses corner_r_front)
-square_legs_front = false;
+square_legs_front = true;
 // Square off the back half of both legs (uses corner_r_back)
 square_legs_back = false;
 
