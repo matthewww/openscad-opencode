@@ -1,0 +1,26 @@
+{
+    "parameterSets": {
+        "design default values": {
+            "$fn": "64",
+            "bore_d": "5",
+            "corner_r_back": "4",
+            "corner_r_front": "1.25",
+            "face_len": "11",
+            "face_setback": "1",
+            "face_t": "3",
+            "flange_hole_d": "2.8",
+            "flange_hole_depth": "5",
+            "flange_hole_spacing": "12",
+            "lip_h": "1.5",
+            "pocket_d": "8.5",
+            "sleeve_h": "22",
+            "sleeve_wall": "1.5",
+            "sma_d": "6.5",
+            "sma_elev": "30",
+            "square_legs_back": "false",
+            "square_legs_front": "true",
+            "standoff_spacing": "19"
+        }
+    },
+    "fileFormatVersion": "1"
+}
