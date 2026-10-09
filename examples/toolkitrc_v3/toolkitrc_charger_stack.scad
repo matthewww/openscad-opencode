@@ -358,4 +358,15 @@ else {
   if (show_cap) translate([0, 0, tray_h] + len(tiers) * [0, D[0], D[1]]) cap();
 }
 
+// Print set for `osc export`, matching the stack above: [file name, [[variable, value], ...]]
+print_parts = concat(
+  [["tray", [["part", "tray"]]]],
+  [for (i = [0:len(tiers) - 1]) [str("seat", i + 1, "_", tiers[i]),
+    [["part", "seat"], ["charger", tiers[i]], ["tower", i < len(tiers) - 1 || tower || show_cap]]]],
+  bay ? concat([["bay_base", [["part", "bay_base"]]]],
+    [for (i = [0:len(tiers) - 1]) [str("bay", i + 1, i < len(tiers) - 1 ? "" : "_lid"),
+      [["part", "bay"], ["bay_posts", i < len(tiers) - 1]]]]) : [],
+  show_cap ? [["cap", [["part", "cap"]]]] : []);
+echo(print_parts = print_parts);
+
 echo(seat_step = D, tiers = tiers, stack_h = tray_h + (len(tiers) - 1) * D[1] + P(E[1], E[2] + lip)[1], width = (bay ? bpx + bay_post_d / 2 : x_f + foot_w / 2) + x_f + foot_w / 2);

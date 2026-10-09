@@ -29,6 +29,7 @@ Usage: node osc.mjs <command> [options] <file>
 Commands:
   preview <file.scad>   Render PNG preview(s) you can open or attach to a chat
   render  <file.scad>   Export mesh (stl|3mf|off|amf)
+  export  <file.scad>   Export each entry of the model's print_parts to its own file, then check each is one watertight body
   check   <file.scad>   Fast compile/evaluate check (errors, warnings, echo output)
   stats   <file.stl>    Mesh report: triangles, bounding box, volume, watertight
   version               Print OpenSCAD version
@@ -36,13 +37,14 @@ Commands:
 Options:
   --view <name|all>    iso|front|back|left|right|top|bottom|all (default: iso)
   --size <WxH>         preview image size (default: 800x600)
-  --out <file>         output path (default: alongside input)
+  --out <path>         output file, or folder for export (default: alongside input, export: <name>_parts/)
   --format <fmt>       render format (default: stl)
   --ortho              orthographic projection (recommended for proportion checks)
   --render             full CGAL render for previews instead of fast OpenCSG preview
   --colorscheme <n>    OpenSCAD color scheme
   -D, --define <v=e>   override a top-level variable (repeatable)
   --strict             (check) fail on warnings too
+  --overhang <deg>     (stats, export) steepest printable overhang from vertical (default: 45)
   --timeout <sec>      per-invocation timeout (default: 300)
   --openscad <path>    path to openscad binary (default: $OPENSCAD or auto-detect)`);
   process.exit(2);
@@ -65,6 +67,7 @@ function parseArgs(argv) {
     else if (a === "--colorscheme") opts.colorscheme = next();
     else if (a === "--openscad") opts.openscad = next();
     else if (a === "--timeout") opts.timeout = Number(next());
+    else if (a === "--overhang") opts.overhang = Number(next());
     else if (a === "--ortho") opts.ortho = true;
     else if (a === "--render") opts.render = true;
     else if (a === "--strict") opts.strict = true;
@@ -210,8 +213,8 @@ function cmdRender(bin, opts) {
   console.log(`wrote ${out} (${fs.statSync(out).size} bytes)`);
 }
 
-function cmdCheck(bin, opts) {
-  const src = requireInput(opts, ".scad");
+// Evaluate without building geometry (.echo export); returns the exit status and log lines
+function evaluate(bin, src, opts) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "osc-check-"));
   try {
     const echoPath = path.join(tmp, "out.echo");
@@ -223,29 +226,89 @@ function cmdCheck(bin, opts) {
       src,
     ];
     const r = run(bin, args, opts.timeout ?? 120);
-    if (r.timedOut) die(`check timed out after ${opts.timeout ?? 120}s`, 1);
+    if (r.timedOut) die(`evaluation timed out after ${opts.timeout ?? 120}s`, 1);
     const echoText = fs.existsSync(echoPath) ? fs.readFileSync(echoPath, "utf8") : "";
     const lines = (echoText + "\n" + r.stdout + "\n" + r.stderr)
       .split(/\r?\n/)
       .map((l) => l.trim())
       .filter(Boolean);
-    const seen = new Set();
-    for (const l of lines) {
-      if (!seen.has(l) && /^(ERROR|WARNING|ECHO|TRACE)/.test(l)) {
-        seen.add(l);
-        console.log(l);
-      }
-    }
-    const hasWarning = lines.some((l) => l.startsWith("WARNING"));
-    const hasError = lines.some((l) => l.startsWith("ERROR"));
-    if (r.status !== 0 || hasError || (opts.strict && hasWarning)) {
-      console.log(`check: FAILED`);
-      process.exit(r.status || 1);
-    }
-    console.log(`check: OK`);
+    return { status: r.status, lines };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+function cmdCheck(bin, opts) {
+  const src = requireInput(opts, ".scad");
+  const { status, lines } = evaluate(bin, src, opts);
+  const seen = new Set();
+  for (const l of lines) {
+    if (!seen.has(l) && /^(ERROR|WARNING|ECHO|TRACE)/.test(l)) {
+      seen.add(l);
+      console.log(l);
+    }
+  }
+  const hasWarning = lines.some((l) => l.startsWith("WARNING"));
+  const hasError = lines.some((l) => l.startsWith("ERROR"));
+  if (status !== 0 || hasError || (opts.strict && hasWarning)) {
+    console.log(`check: FAILED`);
+    process.exit(status || 1);
+  }
+  console.log(`check: OK`);
+}
+
+// Turn a JSON value into an OpenSCAD literal for -D (strings, numbers, booleans, vectors)
+const scadLiteral = (v) => JSON.stringify(v);
+
+function cmdExport(bin, opts) {
+  const src = requireInput(opts, ".scad");
+  const ext = (opts.format ?? "stl").toLowerCase();
+  if (!/^(stl|3mf|off|amf)$/.test(ext)) die(`Unsupported format "${ext}" (stl|3mf|off|amf)`, 2);
+  const { status, lines } = evaluate(bin, src, opts);
+  const errors = lines.filter((l) => l.startsWith("ERROR"));
+  if (status !== 0 || errors.length) {
+    for (const l of errors) console.error(l);
+    die(`export failed: model does not evaluate`, status || 1);
+  }
+  const line = lines.find((l) => l.startsWith("ECHO: print_parts = "));
+  if (!line)
+    die(`No print_parts in ${path.basename(src)}. Add: echo(print_parts = [[name, [[variable, value], ...]], ...]);`, 2);
+  let parts;
+  try {
+    parts = JSON.parse(line.slice("ECHO: print_parts = ".length));
+  } catch {
+    die(`Could not parse print_parts: ${line}`, 2);
+  }
+  const dir = opts.out ? path.resolve(opts.out) : outPath(src, {}, "_parts", "");
+  fs.mkdirSync(dir, { recursive: true });
+  let bad = 0;
+  for (const [name, overrides] of parts) {
+    if (!/^[\w-][\w.-]*$/.test(String(name))) die(`Bad part name "${name}" (letters, digits, - _ . only)`, 2);
+    const out = path.join(dir, `${name}.${ext}`);
+    const defs = overrides.flatMap(([k, v]) => ["-D", `${k}=${scadLiteral(v)}`]);
+    // Part overrides come last, so they win over the user's -D values
+    const r = run(bin, ["-o", out, ...definesArgs(opts), ...defs, src], opts.timeout);
+    const logs = logLines(r.stdout, r.stderr);
+    if (r.timedOut || r.status !== 0 || logs.some((l) => l.startsWith("ERROR")) || !fs.existsSync(out)) {
+      for (const l of logs) console.error(l);
+      die(`export failed on part "${name}"`, r.status || 1);
+    }
+    if (ext !== "stl") {
+      console.log(`${name}: wrote ${out}`);
+      continue;
+    }
+    const s = meshStats(fs.readFileSync(out), opts.overhang ?? 45);
+    const ohArea = s.overhangs.reduce((n, g) => n + g.area, 0);
+    const ok = s.openEdges === 0 && s.shells === 1;
+    if (!ok) bad++;
+    console.log(
+      `${name}: ${s.size.map((n) => fmt(n, 1)).join(" x ")} mm, ${fmt(s.volume / 1000)} cm3, ` +
+        `${ok ? "single watertight body" : `${s.shells} shell(s), ${s.openEdges} open edge(s)`}, ` +
+        `${fmt(ohArea, 0)} mm2 overhang in ${s.overhangs.length} region(s)`
+    );
+  }
+  console.log(`wrote ${parts.length} part(s) to ${dir}`);
+  if (bad) process.exit(1);
 }
 
 function stlFormat(buf) {
@@ -316,11 +379,53 @@ function fmt(n, d = 2) {
   return n.toFixed(d);
 }
 
-function cmdStats(opts) {
-  const file = requireInput(opts, ".stl");
-  const buf = fs.readFileSync(file);
+function makeFind(parent) {
+  return (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+}
+
+// Downward faces past the overhang limit and off the bed, grouped into connected regions
+function overhangs(verts, tris, nzs, areas, zmin, limitDeg) {
+  const cut = -Math.sin((limitDeg * Math.PI) / 180);
+  const hits = [];
+  for (let i = 0; i < tris.length; i++) {
+    if (!(nzs[i] < cut)) continue;
+    if (tris[i].every((v) => verts[v * 3 + 2] - zmin < 0.01)) continue; // sits on the bed
+    hits.push(i);
+  }
+  const parent = hits.map((_, k) => k);
+  const find = makeFind(parent);
+  const owner = new Map();
+  hits.forEach((ti, k) => {
+    for (const v of tris[ti]) {
+      const o = owner.get(v);
+      if (o === undefined) owner.set(v, k);
+      else parent[find(k)] = find(o);
+    }
+  });
+  const regions = new Map();
+  hits.forEach((ti, k) => {
+    const r = find(k);
+    let g = regions.get(r);
+    if (!g) regions.set(r, (g = { area: 0, flat: true, min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] }));
+    g.area += areas[ti];
+    if (nzs[ti] > -0.999) g.flat = false;
+    for (const v of tris[ti])
+      for (let a = 0; a < 3; a++) {
+        g.min[a] = Math.min(g.min[a], verts[v * 3 + a]);
+        g.max[a] = Math.max(g.max[a], verts[v * 3 + a]);
+      }
+  });
+  return [...regions.values()].sort((a, b) => b.area - a.area);
+}
+
+function meshStats(buf, overhangDeg = 45) {
   const { verts, tris } = parseSTL(buf);
-  const format = stlFormat(buf);
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   let volume = 0;
@@ -334,7 +439,10 @@ function cmdStats(opts) {
     const dkey = `${a},${b}`;
     dir.set(dkey, (dir.get(dkey) ?? 0) + 1);
   };
-  for (const [a, b, c] of tris) {
+  const nzs = new Float64Array(tris.length);
+  const areas = new Float64Array(tris.length);
+  for (let t = 0; t < tris.length; t++) {
+    const [a, b, c] = tris[t];
     const ax = verts[a * 3], ay = verts[a * 3 + 1], az = verts[a * 3 + 2];
     const bx = verts[b * 3], by = verts[b * 3 + 1], bz = verts[b * 3 + 2];
     const cx = verts[c * 3], cy = verts[c * 3 + 1], cz = verts[c * 3 + 2];
@@ -354,6 +462,8 @@ function cmdStats(opts) {
     const nlen = Math.hypot(nx, ny, nz);
     if (nlen === 0) degenerate++;
     area += nlen / 2;
+    nzs[t] = nlen === 0 ? 0 : nz / nlen;
+    areas[t] = nlen / 2;
     volume +=
       (ax * (by * cz - bz * cy) +
         ay * (bz * cx - bx * cz) +
@@ -373,26 +483,41 @@ function cmdStats(opts) {
     if (dir.get(`${i},${j}`) !== 1 || dir.get(`${j},${i}`) !== 1) badWinding++;
   }
   const parent = Array.from({ length: verts.length / 3 }, (_, i) => i);
-  const find = (x) => {
-    while (parent[x] !== x) {
-      parent[x] = parent[parent[x]];
-      x = parent[x];
-    }
-    return x;
-  };
+  const find = makeFind(parent);
   for (const [a, b, c] of tris) {
     parent[find(a)] = find(b);
     parent[find(a)] = find(c);
   }
   const roots = new Set();
   for (let i = 0; i < verts.length / 3; i++) roots.add(find(i));
-  const shells = roots.size;
-  const volumeAbs = Math.abs(volume);
-  const size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+  return {
+    triangles: tris.length,
+    vertices: verts.length / 3,
+    degenerate,
+    min,
+    max,
+    size: [max[0] - min[0], max[1] - min[1], max[2] - min[2]],
+    volume: Math.abs(volume),
+    inverted: volume < 0,
+    area,
+    openEdges,
+    badWinding,
+    shells: roots.size,
+    overhangs: overhangs(verts, tris, nzs, areas, min[2], overhangDeg),
+  };
+}
+
+function cmdStats(opts) {
+  const file = requireInput(opts, ".stl");
+  const buf = fs.readFileSync(file);
+  const format = stlFormat(buf);
+  const limit = opts.overhang ?? 45;
+  const { triangles, vertices, degenerate, min, max, size, volume: volumeAbs, inverted, area, openEdges, badWinding, shells, overhangs: oh } =
+    meshStats(buf, limit);
   const cm3 = volumeAbs / 1000;
   console.log(`${path.basename(file)} - ${format} STL`);
-  console.log(`Triangles:          ${tris.length} (${degenerate} degenerate)`);
-  console.log(`Unique vertices:    ${verts.length / 3}`);
+  console.log(`Triangles:          ${triangles} (${degenerate} degenerate)`);
+  console.log(`Unique vertices:    ${vertices}`);
   console.log(
     `Bounding box (mm):  ${fmt(size[0])} x ${fmt(size[1])} x ${fmt(size[2])}`
   );
@@ -420,7 +545,15 @@ function cmdStats(opts) {
   console.log(
     `Shells:             ${shells}${shells > 1 ? " - NOT A SINGLE BODY" : ""}`
   );
-  if (volume < 0) console.log(`Note: negative volume - facet winding is inverted (mirrored STL?)`);
+  const ohArea = oh.reduce((n, g) => n + g.area, 0);
+  console.log(`Overhang > ${limit} deg: ${fmt(ohArea)} mm2 in ${oh.length} region(s), bed contact excluded`);
+  for (const g of oh.slice(0, 8))
+    console.log(
+      `  ${fmt(g.area, 1).padStart(8)} mm2 ${g.flat ? "flat (bridge?)" : "sloped       "}` +
+        `  x ${fmt(g.min[0], 1)}..${fmt(g.max[0], 1)}  y ${fmt(g.min[1], 1)}..${fmt(g.max[1], 1)}  z ${fmt(g.min[2], 1)}..${fmt(g.max[2], 1)}`
+    );
+  if (oh.length > 8) console.log(`  ... ${oh.length - 8} smaller region(s)`);
+  if (inverted) console.log(`Note: negative volume - facet winding is inverted (mirrored STL?)`);
   if (!watertight || shells > 1) process.exit(1);
 }
 
@@ -433,12 +566,13 @@ function cmdVersion(bin) {
 
 function main() {
   const argv = process.argv.slice(2);
-  if (argv.length === 0) usage();
+  if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
   const cmd = argv[0];
   const opts = parseArgs(argv.slice(1));
   const bin = findOpenSCAD(opts.openscad);
   if (cmd === "preview") cmdPreview(bin, opts);
   else if (cmd === "render") cmdRender(bin, opts);
+  else if (cmd === "export") cmdExport(bin, opts);
   else if (cmd === "check") cmdCheck(bin, opts);
   else if (cmd === "stats") cmdStats(opts);
   else if (cmd === "version") cmdVersion(bin);
