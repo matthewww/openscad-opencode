@@ -7,6 +7,9 @@
   "bin": {
     "osc": ".opencode/skills/openscad/osc.mjs"
   },
+  "scripts": {
+    "test": "node test/overhang.test.mjs"
+  },
   "files": [
     ".opencode/skills/openscad/SKILL.md",
     ".opencode/skills/openscad/osc.mjs",
